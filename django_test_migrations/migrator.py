@@ -1,4 +1,5 @@
 from typing import Any
+from collections import defaultdict
 
 from django.core.management import call_command
 from django.core.management.color import no_style
@@ -9,7 +10,6 @@ from django.db.models import ManyToManyField
 
 from django_test_migrations import sql
 from django_test_migrations.logic.migrations import normalize
-from django_test_migrations.plan import truncate_plan
 from django_test_migrations.signals import mute_migrate_signals
 from django_test_migrations.types import (
     MigrationPlan,
@@ -43,6 +43,45 @@ class Migrator:
         self._database: str = database
         self._executor = MigrationExecutor(connections[self._database])
 
+    def collect_leaf_nodes(self, targets: MigrationSpec) -> MigrationSpec:
+        """Identify all leaf nodes, not migrating past the given targets per app"""
+        targets = normalize(targets)
+
+        # sort the migrations per-app
+        migrations = defaultdict(set)
+        for appname, migration in targets:
+            migrations[appname].add(migration)
+
+        # identify which of the target migrations in each app is the child node
+        child_migrations = {}
+        for appname in migrations:
+            if len(migrations[appname]) > 1:
+                app_migrations = [(appname, m) for m in list(migrations[appname])]  # need list to iterate
+                current = app_migrations[0]
+                node = self._executor.loader.graph.node_map[current]
+                while node.children:
+                    # follow each child down the node map looking for other migrations from this app
+                    # the youngest child we find will be the migration we have to target for this app
+                    for child in node.children:
+                        if child.key in app_migrations:
+                            # we found one of the targets, record it as the youngest child and continue
+                            current = child.key
+                            node = child
+                        elif child.key[0] == appname:
+                            # this node is from this app, follow it down the chain
+                            node = child
+                child_migrations[appname] = current[1]
+            else:
+                child_migrations[appname] = migrations[appname].pop()
+
+        # collect all leaf nodes for all migrations
+        leaf_nodes = {appname: migration for appname, migration in self._executor.loader.graph.leaf_nodes()}
+
+        # ensure the target migrations are the last migrations to be applied in that app
+        leaf_nodes.update(child_migrations)
+
+        return [(appname, migration) for appname, migration in leaf_nodes.items()]
+
     def apply_initial_migration(self, targets: MigrationSpec) -> ProjectState:
         """Reverse back to the original migration."""
         migration_targets = normalize(targets)
@@ -54,11 +93,11 @@ class Migrator:
 
         # prepare as broad plan as possible based on full plan
         self._executor.loader.build_graph()  # reload
-        full_plan = self._executor.migration_plan(
-            self._executor.loader.graph.leaf_nodes(),
+        leaf_nodes = self.collect_leaf_nodes(migration_targets)
+        plan = self._executor.migration_plan(
+            leaf_nodes,
             clean_start=True,
         )
-        plan = truncate_plan(migration_targets, full_plan)
 
         # apply all migrations from generated plan on clean database
         # (only forward, so any unexpected migration won't be applied)
