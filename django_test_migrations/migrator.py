@@ -70,7 +70,8 @@ class Migrator:
     def apply_tested_migration(self, targets: MigrationSpec) -> ProjectState:
         """Apply the next migration."""
         self._executor.loader.build_graph()  # reload
-        return self._migrate(normalize(targets))
+        return self._migrate(
+            self._identify_target_migrations(normalize(targets)))
 
     def reset(self) -> None:
         """
