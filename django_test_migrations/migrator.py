@@ -45,7 +45,7 @@ class Migrator:
 
     def apply_initial_migration(self, targets: MigrationSpec) -> ProjectState:
         """Reverse back to the original migration."""
-        targets = normalize(targets)
+        targets = self._identify_target_migrations(normalize(targets))
 
         style = no_style()
         # start from clean database state
@@ -138,3 +138,23 @@ class Migrator:
         model_remote = getattr(model_field, 'remote_field', None)
         if model_remote and not getattr(model_remote, 'through_fields', None):
             model_remote.through_fields = through_fields
+
+    def _identify_target_migrations(
+        self, targets: list[MigrationTarget]
+    ) -> list[MigrationTarget]:
+        """Translates __first__, __latest__, and prefixes into names."""
+        output = []
+        for target in targets:
+            if target[1] is None:
+                output.append(target)
+            elif target[1] == '__first__':
+                output.extend(
+                    self._executor.loader.graph.root_nodes(app=target[0]))
+            elif target[1] == '__latest__':
+                output.extend(
+                    self._executor.loader.graph.leaf_nodes(app=target[0]))
+            else:
+                migration = self._executor.loader.get_migration_by_prefix(
+                    target[0], target[1])
+                output.append((migration.app_label, migration.name))
+        return output
